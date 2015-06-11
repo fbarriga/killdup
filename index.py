@@ -11,121 +11,141 @@ import os
 import os.path
 import ffvideo
 
-skip_first_seconds=5
-steps_every_seconds=10
-threshold = 10
+skip_first_seconds = 5
+steps_every_seconds = 10
+threshold = 2
 
-valid_extentions = [ 'flv', 'mpeg', 'mp4', 'mkv', 'wmv' ]
-def getLength(filename):
-    length = -1
+valid_extensions = ['mp4', 'avi', 'wmv', 'flv', 'mpg', 'mpeg', 'mov', 'mkv']
+
+
+def get_video_length(filename):
     try:
         video = ffvideo.VideoStream(filename)
-        length = int(round(video.duration*1000))
+        length = int(round(video.duration * 1000))
     except:
         length = -1
     return length
 
-def getVideoId(filename):
-    size = os.path.getsize(filename)
-    length = getLength(filename)
-    id = str( size + length )
-    return id, length
 
-def createInitialIndex(db, dataset):
-    for dirpath, dirnames, filenames in os.walk( dataset ):
+def get_video_id(filename):
+    size = os.path.getsize(filename)
+    length = get_video_length(filename)
+    video_id = str(size + length)
+    return video_id, length
+
+
+def create_initial_index(db, dataset):
+    for dir_path, dir_names, filenames in os.walk(dataset):
         for filename in [f for f in filenames]:
-            f = os.path.join( dirpath, filename )
-            id, length = getVideoId( f )
+            if filename.split('.')[-1].lower() not in valid_extensions:
+                continue
+
+            f = os.path.join(dir_path, filename)
+            video_id, length = get_video_id(f)
             if length == -1:
                 print "Invalid file: %s" % f
                 continue
 
-            if db.has_key( id ) == False:
-                db[id] = { 'id': id, 'length': str(length), 'path': f, 'hashed': False, 'hashes': [] }
-            else:
-                print "File already indexed: %s" % filename
+            if video_id not in db:
+                db[video_id] = {'id': video_id, 'length': str(length), 'path': f, 'hashed': False, 'hashes': []}
+                db.sync()
+            # else:
+            #     print "File already indexed: %s" % filename
 
-def indexVideo(filename):
+
+def index_video(filename):
     video = ffvideo.VideoStream(filename)
     hashes = []
     for t in xrange(skip_first_seconds, int(video.duration), steps_every_seconds):
-        try:
-            frame = video.get_frame_at_sec(t).image()
-            hash = str(imagehash.dhash(frame))
-            hashes.append( { 't': t, 'hash': hash } )
-        except:
-            print "Error processing file."
+        # try:
+        frame = video.get_frame_at_sec(t).image()
+        frame_hash = str(imagehash.dhash(frame))
+        hashes.append({'t': t, 'hash': frame_hash})
+        # except:
+        #     print "Error processing file."
 
     return hashes
 
 
-def indexVideos(db):
+def index_videos(db):
     for x in db:
         video = db[x]
         print "Indexing: %s" % video['path']
-        if video['hashed'] == False:
-            video['hashes']= indexVideo(video['path'])
-            video['hashed'] = True
-        else:
-            print "hashes already calculated"
+        if video['hashed'] is False or len(video['hashes']) == 0:
+            try:
+                video['hashes'] = index_video(video['path'])
+                video['hashed'] = True
+            except:
+                print "Error processing file %s" % video['path']
+            finally:
+                db.sync()
+                # else:
+                #     print "hashes already calculated"
 
-def searchHash(db, hashStr, skipArr):
-    hash = imagehash.hex_to_hash(hashStr)
-    skipSet = set(skipArr)
+
+def search_hash(db, hash_str, skip_array):
+    image_hash = imagehash.hex_to_hash(hash_str)
+    skip_set = set(skip_array)
     results = []
     for x in db:
         video = db[x]
-        if x in skipSet:
+        if x in skip_set:
             continue
-
-        if video['hashed'] == False:
+        if video['hashed'] is False:
             continue
-
         for h in video['hashes']:
-            distance = imagehash.hex_to_hash(h['hash']) - hash
+            distance = imagehash.hex_to_hash(h['hash']) - image_hash
             if distance < threshold:
-                results.append( { 'id': x, 't': h['t'], 'distance': distance })
+                results.append({'id': x, 't': h['t'], 'distance': distance})
+
     return results
 
-def getFilename(db, id):
-    return db[id]['path']
 
-def searchDuplicates(db):
-    alreadyScanned = []
+def get_filename(db, video_id):
+    return db[video_id]['path']
+
+def search_duplicates(db):
+    already_scanned = []
     results = {}
     for x in db:
         results[x] = {}
-        alreadyScanned.append(x)
+        already_scanned.append(x)
         video = db[x]
         for h in video['hashes']:
             results[x][h['hash']] = []
-            result = searchHash(db, h['hash'], alreadyScanned)
-            if len( result ) > 0:
-                results[x][h['hash']].append( result )
+            result = search_hash(db, h['hash'], already_scanned)
+            if len(result) > 0:
+                results[x][h['hash']].append(result)
 
     # print "%s" % results
     for x in results:
-        if len( results[x] ) > 0:
-            print "Filename %s" % getFilename(db,x)
-            for frame in results[x]:
-                if len( results[x][frame] ) > 0:
-                    for f in results[x][frame]:
-                        for f2 in f:
-                            print " -> distance: %d t: %d %s" % ( f2['distance'], f2['t'], getFilename(db, f2['id']) )
+        if len(results[x]) == 0:
+            continue
+        print "Filename %s" % get_filename(db, x)
+        for frame in results[x]:
+            if len(results[x][frame]) == 0:
+                continue
+            for f in results[x][frame]:
+                for f2 in f:
+                    print " -> distance: %d t: %d %s" % (f2['distance'], f2['t'], get_filename(db, f2['id']))
 
-# construct the argument parse and parse the arguments
-ap = argparse.ArgumentParser()
-ap.add_argument("-d", "--dataset", required = True,
-                help = "path to input dataset of videos")
-ap.add_argument("-s", "--shelve", required = True,
-                help = "output shelve database")
-args = vars(ap.parse_args())
+if __name__ == "__main__":
+    # construct the argument parse and parse the arguments
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-d", "--dataset", required=True,
+                    help="path to input dataset of videos")
+    ap.add_argument("-s", "--shelve", required=True,
+                    help="output shelve database")
+    args = vars(ap.parse_args())
 
-# open the shelve database
-db = shelve.open(args["shelve"], writeback = True)
-createInitialIndex(db, args["dataset"])
-indexVideos(db)
-# searchDuplicates(db)
-#searchHash(db, "ff73a2c409133e00")
-db.close()
+    # open the shelve database
+    dbInstance = shelve.open(args["shelve"], writeback=True)
+    create_initial_index(dbInstance, args["dataset"])
+    print "Initial index created"
 
+    index_videos(dbInstance)
+    print "Videos indexed"
+
+    # search_duplicates(db)
+    # search_hash(db, "ff73a2c409133e00")
+    dbInstance.close()
